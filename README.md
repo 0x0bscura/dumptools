@@ -8,7 +8,7 @@ Fast Rust CLI for threat and intelligence analysts to convert and scan credentia
  / // / // /  ' \/ _ \/ / / _ \/ _ \/ (_-<
 /____/\_,_/_/_/_/ .__/_/  \___/\___/_/___/
                /_/                         
-DumpScan - Scan text dumps for strings with live status output
+dumptools – fast conversion and scanning for credential dumps
 made by 0bscura with <3
 ```
 
