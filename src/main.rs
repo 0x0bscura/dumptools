@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use aho_corasick::AhoCorasick;
 const RESET: &str = "\u{001b}[0m";
@@ -273,24 +273,36 @@ fn run_convert(opts: ConvertOptions) -> io::Result<()> {
 fn run_scan(opts: ScanOptions) -> io::Result<()> {
     print_banner();
 
-    println!("Needles: {:?}", opts.needles);
-    println!("Path: {}", opts.path.display());
-    println!("Case-insensitive: {}", opts.ignore_case);
+    let heading = |label: &str| colour(label, YELLOW);
+    println!("{}", heading("Needles:"));
+    for needle in &opts.needles {
+        println!("  {} {}", colour("→", GREEN), needle);
+    }
+    println!();
     println!(
-        "Output file: {}",
+        "{} {}",
+        heading("Path:"),
+        opts.path.display()
+    );
+    println!(
+        "{} {}",
+        heading("Case-insensitive:"),
+        opts.ignore_case
+    );
+    println!(
+        "{} {}",
+        heading("Output file:"),
         opts.output
             .as_ref()
             .map(|p| p.display().to_string())
             .unwrap_or_else(|| "None".to_string())
     );
-    println!("Threads: {}\n", opts.threads);
+    println!("{} {}\n", heading("Threads:"), opts.threads);
 
     let files = collect_text_files(&opts.path)?;
     let total = files.len();
 
-    println!(
-        "Loaded {total} files",
-    );
+    println!("{}", colour(&format!("Loaded {total} files"), YELLOW));
     let dir_counts = directory_counts(&files, &opts.path);
     let max_count_width = dir_counts
         .iter()
@@ -304,8 +316,9 @@ fn run_scan(opts: ScanOptions) -> io::Result<()> {
             format!("{}/{}", base_label(&opts.path), dir.display())
         };
         println!(
-            "  {} Loaded {:>width$} files in  {}",
+            "  {} {} {:>width$} files in  {}",
             colour("→", GREEN),
+            heading("Loaded"),
             count,
             dir_display,
             width = max_count_width
@@ -359,6 +372,7 @@ fn run_scan(opts: ScanOptions) -> io::Result<()> {
 
     let mut handles = Vec::new();
     let chunk_size = (total_files + active_threads - 1) / active_threads;
+    let start_time = Instant::now();
 
     for thread_id in 0..active_threads {
         let start = thread_id * chunk_size;
@@ -426,12 +440,20 @@ fn run_scan(opts: ScanOptions) -> io::Result<()> {
     }
 
     let hits = total_hits.load(Ordering::SeqCst);
+    let elapsed = start_time.elapsed();
     println!("\n[{}] {} Scan Complete!", timestamp(), colour("[*]", YELLOW));
     println!(
-        "[{}] {} Total hits: {}\n",
+        "[{}] {} Total hits: {}",
         timestamp(),
         colour("[+]", GREEN),
         hits
+    );
+    println!(
+        "{} Completed in {}h {}m {}s\n",
+        colour("[=]", GREEN),
+        elapsed.as_secs() / 3600,
+        (elapsed.as_secs() % 3600) / 60,
+        elapsed.as_secs() % 60
     );
 
     Ok(())
@@ -545,13 +567,22 @@ fn scan_file_multi(
     output_file: &Arc<Mutex<BufWriter<File>>>,
 ) -> io::Result<usize> {
     let file = File::open(path)?;
-    let reader = BufReader::new(file);
+    let mut reader = BufReader::new(file);
     let mut found = 0;
     let mut hits: Vec<String> = Vec::new();
+    let mut buf: Vec<u8> = Vec::new();
 
-    for (line_no, line) in reader.lines().enumerate() {
-        let line = line?;
-        let hay = &line;
+    let mut line_no = 0;
+    loop {
+        buf.clear();
+        let bytes = reader.read_until(b'\n', &mut buf)?;
+        if bytes == 0 {
+            break;
+        }
+        line_no += 1;
+        let line_lossy = String::from_utf8_lossy(&buf);
+        let line = line_lossy.as_ref();
+        let hay = line.trim_end_matches(&['\r', '\n'][..]);
 
         // AC for non-email needles
         if let Some(ac_ref) = ac.as_ref() {
@@ -560,7 +591,7 @@ fn scan_file_multi(
                     .get(mat.pattern().as_usize())
                     .map(|s: &String| s.as_str())
                     .unwrap_or("");
-                hits.push(format_hit(path, line_no + 1, needle));
+                hits.push(format_hit(path, line_no, needle, hay));
                 found += 1;
             }
         }
@@ -569,7 +600,7 @@ fn scan_file_multi(
         if !email_set.is_empty() {
             for token in email_like_tokens(hay, ignore_case) {
                 if email_set.contains(&token) {
-                    hits.push(format_hit(path, line_no + 1, &token));
+                    hits.push(format_hit(path, line_no, &token, hay));
                     found += 1;
                 }
             }
@@ -586,13 +617,15 @@ fn scan_file_multi(
     Ok(found)
 }
 
-fn format_hit(path: &Path, line_no: usize, needle: &str) -> String {
+fn format_hit(path: &Path, line_no: usize, needle: &str, line: &str) -> String {
+    let content = line.trim_end();
     format!(
-        "{{\"line\":{},\"file\":\"{}\",\"needle\":\"{}\",\"timestamp\":\"{}\"}}",
+        "{{\"line\":{},\"file\":\"{}\",\"needle\":\"{}\",\"timestamp\":\"{}\",\"content\":\"{}\"}}",
         line_no,
         json_escape(&path.display().to_string()),
         json_escape(needle),
-        timestamp()
+        timestamp(),
+        json_escape(content)
     )
 }
 
